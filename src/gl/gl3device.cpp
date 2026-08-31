@@ -920,6 +920,16 @@ getRenderState(int32 state)
 static void
 resetRenderState(void)
 {	
+	// the texture stage cache still has entries from the old context, and a raster landing on a freed
+	// raster's address makes setRasterStage skip the bind, so text and sprites draw
+	// with whatever texture the new context put under the old name after a video
+	// mode change
+	int32 i;
+	for(i = 0; i < MAXNUMSTAGES; i++){
+		rwStateCache.texstage[i].raster = nil;
+		boundTexture[i] = 0;
+	}
+	activeTexture = -1;
 	rwStateCache.alphaFunc = ALPHAGREATEREQUAL;
 	alphaFunc = 0;
 	alphaRef = 10.0f/255.0f;
@@ -1895,6 +1905,10 @@ initOpenGL(void)
 static int
 termOpenGL(void)
 {
+	// the shader cache still points into the old context, and a new shader landing on a freed
+	// shader's address makes use() skip glUseProgram, so no glyph or sprite comes out after a
+	// video mode change
+	currentShader = nil;
 	closeIm3D();
 	closeIm2D();
 
