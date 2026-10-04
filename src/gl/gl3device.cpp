@@ -1415,6 +1415,19 @@ showRaster(Raster *raster, uint32 flags)
 //	glViewport(raster->offsetX, raster->offsetY,
 //		raster->width, raster->height);
 
+	// The camera renders into its own fbo (see rasterCreateCamera);
+	// put the frame on the window right before presenting it.
+	Raster *top = raster->parent ? raster->parent : raster;
+	Gl3Raster *natras = PLUGINOFFSET(Gl3Raster, top, nativeRasterOffset);
+	if(top->type == Raster::CAMERA && natras->fbo){
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, natras->fbo);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBlitFramebuffer(0, 0, top->width, top->height,
+			0, 0, top->width, top->height,
+			GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_FRAMEBUFFER, currentFramebuffer);
+	}
+
 #ifdef LIBRW_SDL2
 	if(flags & Raster::FLIPWAITVSYNCH)
 		SDL_GL_SetSwapInterval(1);
@@ -1444,6 +1457,21 @@ rasterRenderFast(Raster *raster, int32 x, int32 y)
 	case Raster::CAMERATEXTURE:
 		switch(src->type){
 		case Raster::CAMERA:
+			// Blit through the texture's fbo instead of glCopyTexSubImage2D:
+			// Mesa's V3D (Raspberry Pi) has no GPU path for copying from a
+			// linear winsys buffer into a texture, so it maps the backbuffer
+			// and waits for the GPU on every copy. A framebuffer blit stays
+			// on the GPU. Same source either way: the bound framebuffer.
+			if(natdst->fbo && glad_glBlitFramebuffer){
+				int32 dy = (dst->height-src->height)-y;
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, currentFramebuffer);
+				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, natdst->fbo);
+				glBlitFramebuffer(0, 0, src->width, src->height,
+					x, dy, x+src->width, dy+src->height,
+					GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				glBindFramebuffer(GL_FRAMEBUFFER, currentFramebuffer);
+				return 1;
+			}
 			setActiveTexture(0);
 			glBindTexture(GL_TEXTURE_2D, natdst->texid);
 			glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, (dst->height-src->height)-y,
@@ -1589,6 +1617,10 @@ startSDL2(void)
 		SDL_DestroyWindow(win);
 		return 0;
 	}
+	// Mesa's V3D tops out at GL 3.1, so we end up on the 2.1 profile and glad
+	// skips glBlitFramebuffer; Mesa still exposes it there (ARB_framebuffer_object)
+	if(glad_glBlitFramebuffer == nil)
+		glad_glBlitFramebuffer = (PFNGLBLITFRAMEBUFFERPROC)SDL_GL_GetProcAddress("glBlitFramebuffer");
 
 	printf("OpenGL version: %s\n", glGetString(GL_VERSION));
 
@@ -1755,6 +1787,10 @@ startGLFW(void)
 		glfwDestroyWindow(win);
 		return 0;
 	}
+	// Mesa's V3D tops out at GL 3.1, so we end up on the 2.1 profile and glad
+	// skips glBlitFramebuffer; Mesa still exposes it there (ARB_framebuffer_object)
+	if(glad_glBlitFramebuffer == nil)
+		glad_glBlitFramebuffer = (PFNGLBLITFRAMEBUFFERPROC)glfwGetProcAddress("glBlitFramebuffer");
 
 	printf("OpenGL version: %s\n", glGetString(GL_VERSION));
 

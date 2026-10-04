@@ -156,7 +156,10 @@ rasterCreateCameraTexture(Raster *raster)
 		break;
 	case Raster::C888:
 	default:
-		natras->internalFormat = GL_RGB8;
+		// Store RGB camera textures as RGBA8: drivers without a renderable
+		// RGB8 format (e.g. V3D on the Raspberry Pi) otherwise fall back to a
+		// CPU readback for every glCopyTexSubImage2D from the backbuffer.
+		natras->internalFormat = GL_RGBA8;
 		natras->format = GL_RGB;
 		natras->type = GL_UNSIGNED_BYTE;
 		natras->hasAlpha = 0;
@@ -226,6 +229,24 @@ rasterCreateCamera(Raster *raster)
 	natras->texid = 0;
 	natras->fbo = 0;
 	natras->fboMate = nil;
+
+	// Render the camera into an fbo instead of the window, which showRaster
+	// blits to the window once per frame. On Mesa's V3D (Raspberry Pi) the
+	// window is a linear buffer the GPU cannot copy from, so every backbuffer
+	// grab (post fx, env map) used to map it and stall on the GPU.
+	if(!gl3Caps.gles && glad_glBlitFramebuffer && raster->width > 0 && raster->height > 0){
+		glGenTextures(1, &natras->texid);
+		uint32 prev = bindTexture(natras->texid);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, raster->width, raster->height,
+		             0, GL_RGBA, GL_UNSIGNED_BYTE, nil);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		bindTexture(prev);
+		glGenFramebuffers(1, &natras->fbo);
+		bindFramebuffer(natras->fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, natras->texid, 0);
+		bindFramebuffer(0);
+	}
 
 	return raster;
 }
@@ -508,8 +529,16 @@ assert(natras->format == GL_RGBA);
 		px = (uint8*)rwMalloc(allocSz, MEMDUR_EVENT | ID_DRIVER);
 		assert(raster->pixels == nil);
 		raster->pixels = px;
-		glReadBuffer(GL_BACK);
-		glReadPixels(0, 0, raster->width, raster->height, GL_RGB, GL_UNSIGNED_BYTE, px);
+		if(natras->fbo){
+			GLint prevRead;
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, natras->fbo);
+			glReadPixels(0, 0, raster->width, raster->height, GL_RGB, GL_UNSIGNED_BYTE, px);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+		}else{
+			glReadBuffer(GL_BACK);
+			glReadPixels(0, 0, raster->width, raster->height, GL_RGB, GL_UNSIGNED_BYTE, px);
+		}
 
 		raster->privateFlags = lockMode;
 		break;
@@ -866,6 +895,10 @@ destroyNativeRaster(void *object, int32 offset, int32)
 			Gl3Raster *zras = GETGL3RASTEREXT(natras->fboMate);
 			zras->fboMate = nil;
 			natras->fboMate = nil;
+		}
+		if(natras->fbo){
+			glDeleteFramebuffers(1, &natras->fbo);
+			glDeleteTextures(1, &natras->texid);
 		}
 		break;
 	}
